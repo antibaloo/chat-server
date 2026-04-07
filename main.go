@@ -41,8 +41,6 @@ var (
 		chats:       make(map[int]*Chat),
 		subscribers: make(map[chan Message]struct{}),
 	}
-	messageID = 0
-	idMutex   sync.Mutex
 	db        *sql.DB
 )
 
@@ -98,13 +96,6 @@ func loadMessagesFromDB() (map[int][]Message, error) {
 	return messagesByChat, nil
 }
 
-// getNextMessageID возвращает следующий ID сообщения
-func getNextMessageID() int {
-	idMutex.Lock()
-	defer idMutex.Unlock()
-	messageID++
-	return messageID
-}
 
 // getOrCreateChat получает или создает чат
 func getOrCreateChat(chatID int) *Chat {
