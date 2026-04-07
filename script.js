@@ -22,7 +22,7 @@ class GlobalChatManager {
         this.isConnecting = true;
         
         try {
-            this.eventSource = new EventSource('https://bx24.hwdev.ru/chat/global/messages/');
+            this.eventSource = new EventSource('http://localhost:8080/chat/global/messages/');
             
             this.eventSource.onopen = () => {
                 console.log('✅ Глобальное SSE соединение установлено');
@@ -395,7 +395,7 @@ class ChatClient {
 
     async loadMessages() {
         try {
-            const response = await fetch(`https://bx24.hwdev.ru/chat/${this.chatId}/`);
+            const response = await fetch(`http://localhost:8080/chat/${this.chatId}/`);
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
@@ -411,7 +411,7 @@ class ChatClient {
         if (!text.trim()) return false;
         
         try {
-            const response = await fetch(`https://bx24.hwdev.ru/chat/${this.chatId}/`, {
+            const response = await fetch(`http://localhost:8080/chat/${this.chatId}/`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
