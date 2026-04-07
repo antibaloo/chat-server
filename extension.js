@@ -81,8 +81,8 @@ document.addEventListener("DOMContentLoaded", async () => {
             }
 
 
-            formatTime(timestamp) {
-                const date = new Date(timestamp);
+            formatTime(created_at) {
+                const date = new Date(created_at);
                 return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             }
 

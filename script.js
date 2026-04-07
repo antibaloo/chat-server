@@ -218,7 +218,7 @@ class GlobalChatManager {
                     <div class="message-bubble">
                         <span class="message-username">${this.escapeHtml(msg.username)}</span>
                         <div class="message-text">${this.escapeHtml(msg.text)}</div>
-                        <span class="message-time">${this.formatTime(msg.timestamp)}</span>
+                        <span class="message-time">${this.formatTime(msg.created_at)}</span>
                     </div>
                 </div>
             `;
@@ -249,7 +249,7 @@ class GlobalChatManager {
             <div class="message-bubble">
                 <span class="message-username">${this.escapeHtml(message.username)}</span>
                 <div class="message-text">${this.escapeHtml(message.text)}</div>
-                <span class="message-time">${this.formatTime(message.timestamp)}</span>
+                <span class="message-time">${this.formatTime(message.created_at)}</span>
             </div>
         `;
         
@@ -360,9 +360,9 @@ class GlobalChatManager {
         }
     }
 
-    formatTime(timestamp) {
-        const date = new Date(timestamp);
-        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    formatTime(created_at) {
+        const date = new Date(created_at);
+        return date.toLocaleTimeString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', econd: '2-digit', hour12: false });
     }
 
     escapeHtml(text) {
