@@ -110,6 +110,7 @@ func (c *Chat) addMessage(username, text string) Message {
 	for ch := range c.subscribers {
 			select {
 			case ch <- msg:
+				fmt.Println("Сообщение отправлено в канал подписчика")
 			default:
 					// Избегаем блокировки
 			}
@@ -129,22 +130,6 @@ func (c *Chat) getMessages() []Message {
 	return messages
 }
 
-// subscribe добавляет подписчика на SSE и возвращает канал только для чтения
-func (c *Chat) subscribe() <-chan Message {
-	ch := make(chan Message, 10)
-	c.subMutex.Lock()
-	c.subscribers[ch] = struct{}{}
-	c.subMutex.Unlock()
-	return ch
-}
-
-// unsubscribe удаляет подписчика, принимает канал для записи
-func (c *Chat) unsubscribe(ch chan Message) {
-	c.subMutex.Lock()
-	delete(c.subscribers, ch)
-	c.subMutex.Unlock()
-	close(ch)
-}
 
 // CORS middleware
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -161,6 +146,10 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 	}
 }
+
+
+// sendMessageHandler обрабатывает OPTIONS /chat/{id}/
+func optionsHandler(w http.ResponseWriter, r *http.Request) {}
 
 // sendMessageHandler обрабатывает POST /chat/{id}/
 func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
@@ -267,100 +256,6 @@ func deleteChatHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sseHandler обрабатывает GET /chat/{id}/message/
-func sseHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Получаем ID чата из URL
-	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(pathParts) < 3 || pathParts[0] != "chat" || pathParts[2] != "message" {
-		http.Error(w, "Invalid URL", http.StatusBadRequest)
-		return
-	}
-
-	chatID, err := strconv.Atoi(pathParts[1])
-	if err != nil {
-		http.Error(w, "Invalid chat ID", http.StatusBadRequest)
-		return
-	}
-
-	// Настраиваем SSE
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "SSE not supported", http.StatusInternalServerError)
-		return
-	}
-
-	// Подписываемся на сообщения
-	chat := getOrCreateChat(chatID)
-	messageChan := chat.subscribe()
-
-	// Создаем канал для отписки
-	done := make(chan struct{})
-
-	// Отложенная отписка
-	defer func() {
-		close(done)
-		// Ждем, пока горутина завершится
-		time.Sleep(100 * time.Millisecond)
-		// Преобразуем <-chan Message в chan Message для unsubscribe
-		writeChan := make(chan Message)
-		chat.unsubscribe(writeChan)
-	}()
-
-	// Запускаем горутину для перенаправления сообщений
-	go func() {
-		for {
-			select {
-			case msg, ok := <-messageChan:
-				if !ok {
-					// Канал закрыт, выходим
-					return
-				}
-				select {
-				case <-done:
-					return
-				default:
-					// Отправляем сообщение клиенту
-					data, err := json.Marshal(msg)
-					if err != nil {
-							continue
-					}
-					fmt.Fprintf(w, "data: %s\n\n", data)
-					flusher.Flush()
-					}
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	// Отправляем keep-alive каждые 15 секунд
-	keepAliveTicker := time.NewTicker(15 * time.Second)
-	defer keepAliveTicker.Stop()
-
-	for {
-		select {
-		case <-keepAliveTicker.C:
-			// Отправляем keep-alive
-			fmt.Fprintf(w, ": keepalive\n\n")
-			flusher.Flush()
-
-		case <-r.Context().Done():
-			// Клиент отключился
-			return
-		}
-	}
-}
-
 func globalSSEHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet {
         http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -381,12 +276,13 @@ func globalSSEHandler(w http.ResponseWriter, r *http.Request) {
 
     // Создаем канал для глобальных сообщений
     globalChan := make(chan Message, 100)
-
+	fmt.Println("Создан канал подписчика")
     // Регистрируем глобального подписчика во всех чатах
     chatManager.mutex.RLock()
     for _, chat := range chatManager.chats {
         chat.subMutex.Lock()
         chat.subscribers[globalChan] = struct{}{}
+		fmt.Printf("Канал подписчика добален в чат: %v, подписчиков у чата: %v\n", chat.ID, len(chat.subscribers))
         chat.subMutex.Unlock()
     }
     chatManager.mutex.RUnlock()
@@ -413,7 +309,7 @@ func globalSSEHandler(w http.ResponseWriter, r *http.Request) {
             if !ok {
                 return
             }
-
+			fmt.Println(msg)
             // Определяем ID чата из сообщения
             chatID := 0
             chatManager.mutex.RLock()
@@ -463,19 +359,17 @@ func main() {
 	// API endpoints
 	http.HandleFunc("/chat/global/messages/", corsMiddleware(globalSSEHandler))
 	http.HandleFunc("/chat/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.Trim(r.URL.Path, "/")
-
-		// Проверяем, это запрос к SSE или нет
-		if strings.HasSuffix(path, "/message") {
-			corsMiddleware(sseHandler)(w, r)
-		} else if r.Method == http.MethodPost {
-			corsMiddleware(sendMessageHandler)(w, r)
-		} else if r.Method == http.MethodGet {
-			corsMiddleware(getMessagesHandler)(w, r)
-		} else if r.Method == http.MethodDelete {
-			corsMiddleware(deleteChatHandler)(w, r)
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		switch (r.Method) {
+			case http.MethodPost:
+				corsMiddleware(sendMessageHandler)(w, r)
+			case http.MethodGet:
+				corsMiddleware(getMessagesHandler)(w, r)
+			case http.MethodDelete:
+				corsMiddleware(deleteChatHandler)(w, r)
+			case http.MethodOptions:
+				corsMiddleware(optionsHandler)(w, r)
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
 
