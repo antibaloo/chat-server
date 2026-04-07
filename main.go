@@ -24,19 +24,20 @@ type Chat struct {
 	ID          int
 	Messages    []Message
 	mutex       sync.RWMutex
-	subscribers map[chan Message]struct{}
 	subMutex    sync.RWMutex
 }
 
 // ChatManager управляет всеми чатами
 type ChatManager struct {
 	chats map[int]*Chat
+	subscribers map[chan Message]struct{}
 	mutex sync.RWMutex
 }
 
 var (
         chatManager = &ChatManager{
         	chats: make(map[int]*Chat),
+			subscribers: make(map[chan Message]struct{}),
         }
         messageID = 0
         idMutex   sync.Mutex
@@ -60,7 +61,6 @@ func getOrCreateChat(chatID int) *Chat {
 			chat = &Chat{
 					ID:          chatID,
 					Messages:    []Message{},
-					subscribers: make(map[chan Message]struct{}),
 			}
 			chatManager.chats[chatID] = chat
 	}
@@ -71,19 +71,6 @@ func getOrCreateChat(chatID int) *Chat {
 func deleteChat(chatID int) bool {
 	chatManager.mutex.Lock()
 	defer chatManager.mutex.Unlock()
-
-	chat, exists := chatManager.chats[chatID]
-	if !exists {
-			return false
-	}
-
-	// Закрываем все каналы подписчиков
-	chat.subMutex.Lock()
-	for ch := range chat.subscribers {
-			close(ch)
-	}
-	chat.subscribers = make(map[chan Message]struct{})
-	chat.subMutex.Unlock()
 
 	// Удаляем чат из менеджера
 	delete(chatManager.chats, chatID)
@@ -106,8 +93,8 @@ func (c *Chat) addMessage(username, text string) Message {
 	c.Messages = append(c.Messages, msg)
 
 	// Уведомляем всех подписчиков
-	c.subMutex.RLock()
-	for ch := range c.subscribers {
+	chatManager.mutex.RLock()
+	for ch := range chatManager.subscribers {
 			select {
 			case ch <- msg:
 				fmt.Println("Сообщение отправлено в канал подписчика")
@@ -115,7 +102,7 @@ func (c *Chat) addMessage(username, text string) Message {
 					// Избегаем блокировки
 			}
 	}
-	c.subMutex.RUnlock()
+	chatManager.mutex.RUnlock()
 
 	return msg
 }
@@ -279,22 +266,16 @@ func globalSSEHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Создан канал подписчика")
     // Регистрируем глобального подписчика во всех чатах
     chatManager.mutex.RLock()
-    for _, chat := range chatManager.chats {
-        chat.subMutex.Lock()
-        chat.subscribers[globalChan] = struct{}{}
-		fmt.Printf("Канал подписчика добален в чат: %v, подписчиков у чата: %v\n", chat.ID, len(chat.subscribers))
-        chat.subMutex.Unlock()
-    }
+
+	chatManager.subscribers[globalChan] = struct{}{}
+	fmt.Printf("Канал подписчика добавлен, всего подписчиков: %v\n", len(chatManager.subscribers))
+    
     chatManager.mutex.RUnlock()
 
     // Функция для удаления подписчика
     defer func() {
         chatManager.mutex.RLock()
-        for _, chat := range chatManager.chats {
-            chat.subMutex.Lock()
-            delete(chat.subscribers, globalChan)
-            chat.subMutex.Unlock()
-        }
+        delete(chatManager.subscribers, globalChan)
         chatManager.mutex.RUnlock()
         close(globalChan)
     }()
