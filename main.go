@@ -98,7 +98,7 @@ func loadMessagesFromDB() (map[int][]Message, error) {
 
 //Удаляем чат из БД
 func deleteChatFromDB(chatID int) error {
-	_, err := db.Exec("DELETE FROM chats WHERE id = ?", chatID)
+	_, err := db.Exec("DELETE FROM messeges WHERE chat_id = ?", chatID)
 	return err
 }
 
@@ -511,29 +511,16 @@ func main() {
 		chatManager.chats[chatID] = chat
 		chatManager.mutex.Unlock()
 	}
-
+	router := http.NewServeMux()
 	// API endpoints
-	http.HandleFunc("/chat/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.Trim(r.URL.Path, "/")
-		if strings.HasSuffix(path, "/read") {
-			corsMiddleware(markReadHandler)(w, r)
-		} else if strings.HasSuffix(path, "/unread") {
-			corsMiddleware(unreadHandler)(w, r)
-		} else if strings.HasSuffix(path, "/message") {
-			corsMiddleware(globalSSEHandler)(w, r)
-		}else if r.Method  == http.MethodPost {
-			corsMiddleware(sendMessageHandler)(w, r)
-		}else if r.Method == http.MethodGet{
-			corsMiddleware(getMessagesHandler)(w, r)
-		} else if r.Method == http.MethodDelete {
-				corsMiddleware(deleteChatHandler)(w, r)
-		} else if r.Method == http.MethodOptions{
-			corsMiddleware(optionsHandler)(w, r)
-		}else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
+	router.HandleFunc("GET /chat/global/messages", corsMiddleware(globalSSEHandler))
+	router.HandleFunc("GET /chat/{id}/unread", corsMiddleware(unreadHandler))
+	router.HandleFunc("POST /chat/{id}/read", corsMiddleware(markReadHandler))
+	router.HandleFunc("GET /chat/{id}", corsMiddleware(getMessagesHandler))
+	router.HandleFunc("POST /chat/{id}", corsMiddleware(sendMessageHandler))
+	router.HandleFunc("OPTIONS /chat/{id}", corsMiddleware(optionsHandler))
+	router.HandleFunc("DELETE /chat/{id}", corsMiddleware(deleteChatHandler))
 
 	log.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8080", router))
 }
