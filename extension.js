@@ -23,7 +23,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                 this.isConnecting = true;
                 
                 try {
-                    this.eventSource = new EventSource('http://localhost:8080/chat/global/messages/');
+                    this.eventSource = new EventSource('http://localhost:8080/chat/global/messages');
                     
                     this.eventSource.onopen = () => {
                         console.log('✅ Глобальное SSE соединение для уведомлений менеджеров установлено.');
