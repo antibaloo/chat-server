@@ -96,6 +96,35 @@ func loadMessagesFromDB() (map[int][]Message, error) {
 	return messagesByChat, nil
 }
 
+//Удаляем чат из БД
+func deleteChatFromDB(chatID int) error {
+	_, err := db.Exec("DELETE FROM chats WHERE id = ?", chatID)
+	return err
+}
+
+//Метим сообщения как прочитанные в БД
+func markMessagesAsReadInDB(chatID int, Username string) error {
+	// Отмечаем все сообщения в чате, которые не принадлежат пользователю
+	_, err := db.Exec(`
+		INSERT OR IGNORE INTO read_receipts(message_id, user_name, read_at)
+		SELECT m.id, ?, ?
+		FROM messages m
+		WHERE m.chat_id = ? AND m.user_name != ?
+	`, Username, time.Now().Format(time.RFC3339), chatID, Username)
+	return err
+}
+
+//Получаем количество непрочитанных сообщений в чате для пользователя из БД
+func getUnreadCountFromDB(chatID int, Username string) (int, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*)
+		FROM messages m
+		LEFT JOIN read_receipts rr ON m.id = rr.message_id AND rr.username = ?
+		WHERE m.chat_id = ? AND m.username != ? AND rr.message_id IS NULL
+	`, Username, chatID, Username).Scan(&count)
+	return count, err
+}
 
 // getOrCreateChat получает или создает чат
 func getOrCreateChat(chatID int) *Chat {
@@ -117,7 +146,10 @@ func getOrCreateChat(chatID int) *Chat {
 func deleteChat(chatID int) bool {
 	chatManager.mutex.Lock()
 	defer chatManager.mutex.Unlock()
-
+	
+	if err := deleteChatFromDB(chatID); err != nil {
+		log.Printf("Failed to delete chat %d from DB: %v", chatID, err)
+	}
 	// Удаляем чат из менеджера
 	delete(chatManager.chats, chatID)
 
@@ -154,6 +186,20 @@ func (c *Chat) addMessage(username, text string) (Message, error) {
 	chatManager.mutex.RUnlock()
 
 	return msg, nil
+}
+
+//Отмечаем как прочитанные все сообщения в чате
+func (c *Chat) MarkMessagesAsRead(Username string) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return markMessagesAsReadInDB(c.ID, Username)
+}
+
+//Получаем кол-во непрочитанных сообщений в чате
+func (c *Chat) GetUnreadCount(Username string) (int, error) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return getUnreadCountFromDB(c.ID, Username)
 }
 
 // getMessages возвращает все сообщения чата
@@ -384,6 +430,68 @@ func globalSSEHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// markReadHandler POST /chat/{id}/read
+func markReadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// извлечение chatID аналогично другим хендлерам
+	chatID, err := getChatIDFromPath(r.URL.Path)
+	if err != nil {
+		http.Error(w, "Invalid chat ID", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Username string `json:"user_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" {
+		http.Error(w, "Username required", http.StatusBadRequest)
+		return
+	}
+	chat := getOrCreateChat(chatID)
+	if err := chat.MarkMessagesAsRead(req.Username); err != nil {
+		http.Error(w, "Failed to mark read", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// unreadHandler GET /chat/{id}/unread?user_name=xxx
+func unreadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	chatID, err := getChatIDFromPath(r.URL.Path)
+	if err != nil {
+		http.Error(w, "Invalid chat ID", http.StatusBadRequest)
+		return
+	}
+	Username := r.URL.Query().Get("user_name")
+	if Username == "" {
+		http.Error(w, "Username required", http.StatusBadRequest)
+		return
+	}
+	chat := getOrCreateChat(chatID)
+	count, err := chat.GetUnreadCount(Username)
+	if err != nil {
+		http.Error(w, "Failed to get unread count", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"unread": count})
+}
+
+//Определить ID чата из пути
+func getChatIDFromPath(path string) (int, error) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 || parts[0] != "chat" {
+		return 0, fmt.Errorf("invalid path")
+	}
+	return strconv.Atoi(parts[1])
+}
+
 func main() {
 	err := initDB()
 	if err != nil {
@@ -405,18 +513,23 @@ func main() {
 	}
 
 	// API endpoints
-	http.HandleFunc("/chat/global/messages/", corsMiddleware(globalSSEHandler))
 	http.HandleFunc("/chat/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
+		path := strings.Trim(r.URL.Path, "/")
+		if strings.HasSuffix(path, "/read") {
+			corsMiddleware(markReadHandler)(w, r)
+		} else if strings.HasSuffix(path, "/unread") {
+			corsMiddleware(unreadHandler)(w, r)
+		} else if strings.HasSuffix(path, "/message") {
+			corsMiddleware(globalSSEHandler)(w, r)
+		}else if r.Method  == http.MethodPost {
 			corsMiddleware(sendMessageHandler)(w, r)
-		case http.MethodGet:
+		}else if r.Method == http.MethodGet{
 			corsMiddleware(getMessagesHandler)(w, r)
-		case http.MethodDelete:
-			corsMiddleware(deleteChatHandler)(w, r)
-		case http.MethodOptions:
+		} else if r.Method == http.MethodDelete {
+				corsMiddleware(deleteChatHandler)(w, r)
+		} else if r.Method == http.MethodOptions{
 			corsMiddleware(optionsHandler)(w, r)
-		default:
+		}else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
