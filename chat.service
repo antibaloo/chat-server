@@ -1,0 +1,13 @@
+[Unit]
+Description = Chat-server for Bitrix24
+After = nginx.service
+Requires=nginx.service
+
+[Service]
+User = root
+WorkingDirectory = /usr/local/projects/chat-server
+ExecStart = /usr/local/projects/chat-server/chat
+Restart = always
+
+[Install]
+WantedBy=multi-user.target
