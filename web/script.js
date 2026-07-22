@@ -1,4 +1,4 @@
-class UnifiedChatManager {
+class ChatManager {
     constructor(currentUsername) {
         this.currentUsername = currentUsername;
         this.eventSource = null;
@@ -14,11 +14,12 @@ class UnifiedChatManager {
         await this.connectGlobalSSE();
         this.setupEventListeners();
         await this.loadInitialUnreadCounts();
+        this.startObservingChatButtons();
     }
 
     async connectGlobalSSE() {
         if (this.eventSource) this.eventSource.close();
-        this.eventSource = new EventSource('http://localhost:8080/chat/global/messages');
+        this.eventSource = new EventSource('/chat/global/messages');
         this.eventSource.onopen = () => {
             console.log('✅ SSE соединение установлено');
             this.reconnectAttempts = 0;
@@ -33,17 +34,75 @@ class UnifiedChatManager {
         this.eventSource.onerror = () => this.handleConnectionError();
     }
 
+    async loadInitialUnreadCounts() {
+        let buttons = document.querySelectorAll('.open-chat');
+        for (const btn of buttons) {
+            await this.registerChatButton(btn);
+        }
+    }
+
+    startObservingChatButtons() {
+        const observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length) {
+                    for (const node of mutation.addedNodes) {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            if (node.matches && node.matches('.open-chat')) {
+                                this.registerChatButton(node);
+                            } else if (node.querySelectorAll) {
+                                const btns = node.querySelectorAll('.open-chat');
+                                btns.forEach(btn => this.registerChatButton(btn));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    async registerChatButton(btn) {
+        if (btn.dataset.chatRegistered === 'true') return;
+        btn.dataset.chatRegistered = 'true';
+
+        const chatId = btn.dataset.chatId;
+        const userName = btn.dataset.userName;
+        if (!chatId) return;
+
+        // Устанавливаем обработчик
+        btn.removeEventListener('click', window.joinChat);
+        btn.addEventListener('click', window.joinChat);
+
+        // Загружаем и отображаем непрочитанные
+        if (userName) {
+            const client = new UnifiedChatClient(chatId, userName);
+            const unread = await client.getUnreadCount();
+            if (!this.chatsData.has(chatId)) {
+                this.chatsData.set(chatId, {
+                    messages: [],
+                    unreadCount: unread,
+                    username: userName,
+                    chatClient: null,
+                    pendingAttachments: []
+                });
+            } else {
+                this.chatsData.get(chatId).unreadCount = unread;
+            }
+            this.updateChatBadge(chatId, unread);
+        }
+    }
+    
     handleGlobalMessage(data) {
         const { chatId, message } = data;
-        const isOwn = message.username === this.currentUsername;
-
+        const isOwn = message.user_name === this.currentUsername;
         // 1. Обновляем локальное хранилище сообщений
         if (!this.chatsData.has(chatId)) {
             this.chatsData.set(chatId, {
                 messages: [],
                 unreadCount: 0,
                 username: null,
-                chatClient: null
+                chatClient: null,
+                pendingAttachments: []
             });
         }
         const chatData = this.chatsData.get(chatId);
@@ -52,9 +111,9 @@ class UnifiedChatManager {
         // 2. Определяем, есть ли элемент чата на странице
         const chatElement = document.querySelector(`.open-chat[data-chat-id='${chatId}']`);
         const isChatPresent = !!chatElement;
-        
         // 3. Если чат открыт в данный момент
         if (this.activeChat === chatId) {
+            
             this.addMessageToActiveChat(message);
             // Отмечаем сообщение как прочитанное на сервере
             if (chatData.chatClient) {
@@ -63,21 +122,15 @@ class UnifiedChatManager {
             chatData.unreadCount = 0;
             this.updateChatBadge(chatId, 0);
         }
-        // 4. Если чата нет на странице → отправляем уведомление в Битрикс24
-        else if (!isChatPresent && !isOwn) {
-            this.sendBitrixNotification(chatId, message);
-        }
-        // 5. Если чат присутствует, но не активен → увеличиваем счётчик непрочитанных
-        else if (!isOwn) {
+        // 4. Если чат присутствует, но не активен → увеличиваем счётчик непрочитанных
+        else if (isChatPresent && !isOwn) {
             chatData.unreadCount++;
             this.updateChatBadge(chatId, chatData.unreadCount);
-            this.showSystemMessage(`💬 Новое сообщение в чате ${chatId} от ${message.username}`, 'info');
+            this.showSystemMessage(`💬 Новое сообщение в чате ${chatId} от ${message.user_name}`, 'info');
         }
     }
 
     async sendBitrixNotification(chatId, message) {
-        console.log("Отправляем уведомление в Битрикс24");
-        return; //на стенде отключено
         // Вызываем AJAX-действие, как в старом GlobalNotifications
         try {
             await BX.ajax.runAction('meko:partner.Chat.getUserAndNotify', {
@@ -85,7 +138,7 @@ class UnifiedChatManager {
                     miscountId: chatId,
                     message: message.text,
                     messageId: message.id,
-                    userName: message.username,
+                    userName: message.user_name,
                 }
             });
         } catch(e) {
@@ -93,7 +146,7 @@ class UnifiedChatManager {
         }
     }
 
-    async joinChat(chatId, username, chatname) {
+    async joinChat(chatId, username, chatname, withFiles) {
         if (this.activeChat === chatId) {
             this.showSystemMessage(`⚠️ Вы уже в чате ${chatId}`, 'info');
             return;
@@ -102,7 +155,7 @@ class UnifiedChatManager {
 
         let chatData = this.chatsData.get(chatId);
         if (!chatData) {
-            chatData = { messages: [], unreadCount: 0, username, chatClient: null };
+            chatData = { messages: [], unreadCount: 0, username, chatClient: null, pendingAttachments: []};
             this.chatsData.set(chatId, chatData);
         }
         chatData.username = username;
@@ -116,7 +169,7 @@ class UnifiedChatManager {
         chatData.unreadCount = 0;
         this.updateChatBadge(chatId, 0);
 
-        this.createChatUI(chatId, username, chatname);
+        this.createChatUI(chatId, username, chatname, withFiles);
         this.renderMessages(chatId);
         this.activeChat = chatId;
         this.showSystemMessage(`✅ Присоединились к чату ${chatId}`, 'success');
@@ -124,48 +177,70 @@ class UnifiedChatManager {
 
     async leaveChat(chatId) {
         const chatData = this.chatsData.get(chatId);
+        const container = document.getElementById('chatsContainer');
         if (chatData && chatData.chatClient) chatData.chatClient.disconnect();
         const el = document.getElementById(`chat-${chatId}`);
         if (el) el.remove();
         this.activeChat = null;
+        container.style.display = "none";
         this.showSystemMessage(`👋 Чат ${chatId} закрыт`, 'info');
     }
 
-    createChatUI(chatId, username, chatname) {
+    createChatUI(chatId, username, chatname, withFiles) {
+        let prefix = '';
+        const iframe = document.querySelector('iframe[src^="/crm/lead/details/"]');
+        if (iframe) prefix = 'parent.';
         const container = document.getElementById('chatsContainer');
         const existing = document.getElementById(`chat-${chatId}`);
         if (existing) existing.remove();
         const chatCard = document.createElement('div');
         chatCard.className = 'chat-card';
         chatCard.id = `chat-${chatId}`;
-        chatCard.innerHTML_old = `
-            <div class="chat-header">
-                <h3>${chatname}</h3>
-                <button class="close-chat" onclick="window.chatManager.leaveChat(${chatId})">✕</button>
-            </div>
-            <div class="messages-container" id="messages-${chatId}"></div>
-            <div class="chat-input">
-                <input type="text" id="message-input-${chatId}" 
-                       placeholder="Наберите сообщение" 
-                       onkeypress="window.chatManager.handleKeyPress(event, ${chatId})">
-                <button onclick="window.chatManager.sendMessage(${chatId})">Отправить ➤</button>
-            </div>
-        `;
-        chatCard.innerHTML = `
-            <div class="chat-header">
-                <h3>${chatname}</h3>
-                <button class="close-chat" onclick="window.chatManager.leaveChat(${chatId})">✕</button>
-            </div>
-            <div class="messages-container" id="messages-${chatId}"></div>
-            <div class="chat-input">
-                <input type="text" id="message-input-${chatId}" 
-                       placeholder="Наберите сообщение" 
-                       onkeypress="window.chatManager.handleKeyPress(event, ${chatId})">
-                <button class="attach-btn" onclick="window.chatManager.attachFile(${chatId})">📤</button>
-                <button onclick="window.chatManager.sendMessage(${chatId})">Отправить ➤</button>
-            </div>
-            <input type="file" id="file-input-${chatId}" style="display:none" accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
-        `;
+        const element = document.querySelector('[data-chat-id="'+chatId+'"]');
+        if (element.classList.contains('inactive')){
+            chatCard.innerHTML = `
+                <div class="chat-header">
+                    <h3>${chatname}</h3>
+                    <button class="close-chat" onclick="${prefix}window.chatManager.leaveChat('${chatId}')">✕</button>
+                </div>
+                <div class="messages-container" id="messages-${chatId}"></div>
+            `;
+        }else{
+            if (withFiles){
+                chatCard.innerHTML = `
+                    <div class="chat-header">
+                        <h3>${chatname}</h3>
+                        <button class="close-chat" onclick="${prefix}window.chatManager.leaveChat('${chatId}')">✕</button>
+                    </div>
+                    <div class="messages-container" id="messages-${chatId}"></div>
+                    <div class="chat-input">
+                        <input type="text" id="message-input-${chatId}" 
+                            placeholder="Наберите сообщение" 
+                            onkeypress="${prefix}window.chatManager.handleKeyPress(event, '${chatId}')">
+                        <button class="attach-btn" onclick="${prefix}window.chatManager.attachFile('${chatId}')"><i class="fa-solid fa-file-arrow-up"></i></button>
+                        <button onclick="${prefix}window.chatManager.sendMessage('${chatId}')">Отправить ➤</button>
+                    </div>
+                    <div class="attachments-preview" id="attachments-preview-${chatId}"></div>
+                    <input type="file" id="file-input-${chatId}" style="display:none" multiple accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+            `;
+            }else{
+                chatCard.innerHTML = `
+                    <div class="chat-header">
+                        <h3>${chatname}</h3>
+                        <button class="close-chat" onclick="${prefix}window.chatManager.leaveChat('${chatId}')">✕</button>
+                    </div>
+                    <div class="messages-container" id="messages-${chatId}"></div>
+                    <div class="chat-input">
+                        <input type="text" id="message-input-${chatId}" 
+                            placeholder="Наберите сообщение" 
+                            onkeypress="${prefix}window.chatManager.handleKeyPress(event, '${chatId}')">
+                        <button onclick="${prefix}window.chatManager.sendMessage('${chatId}')">Отправить ➤</button>
+                    </div>
+                `;
+            }
+        }
+        
+        
         container.appendChild(chatCard);
         container.style.display = "flex";
         setTimeout(() => document.getElementById(`message-input-${chatId}`)?.focus(), 150);
@@ -175,22 +250,14 @@ class UnifiedChatManager {
         if (fileInput) {
             fileInput.addEventListener('change', (e) => {
                 if (e.target.files.length > 0) {
-                    this.handleFileSelect(chatId, e.target.files[0]);
-                    e.target.value = ''; // сброс для повторного выбора
+                    // Обрабатываем каждый файл по очереди
+                    const files = Array.from(e.target.files);
+                    this.handleFilesSelected(chatId, files);
+                    e.target.value = ''; // сброс
                 }
             });
         }
     }
-
-    /*
-    // определить, является ли файл изображением
-    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(msg.file_url);
-    const fileHtml = msg.file_url ? (
-        isImage 
-            ? `<div class="message-attachment"><img src="${this.escapeHtml(msg.file_url)}" alt="image" style="max-width: 200px; max-height: 200px;"></div>`
-            : `<div class="message-attachment"><a href="${this.escapeHtml(msg.file_url)}" target="_blank">📤 ${this.escapeHtml(msg.file_name || 'Файл')}</a></div>`
-    ) : '';
-    */
 
     renderMessages(chatId) {
         const chatData = this.chatsData.get(chatId);
@@ -202,19 +269,21 @@ class UnifiedChatManager {
         }
         const html = chatData.messages.map(msg => {
             const isOwn = msg.user_name === chatData.username;
-            const fileHtml = msg.file_url ? `
-                <div class="message-attachment">
-                    <a href="${this.escapeHtml(msg.file_url)}" target="_blank" download="${this.escapeHtml(msg.file_name || 'file')}">
-                        📤 ${this.escapeHtml(msg.file_name || 'Файл')}
-                    </a>
-                </div>
-            ` : '';
+            const attachmentsHtml = msg.attachments && msg.attachments.length ? 
+                `<div class="message-attachments">
+                    ${msg.attachments.map(a => `
+                        <div class="attachment-link">
+                            <i class="fa-solid fa-file-arrow-up"></i>
+                            <a href="${this.escapeHtml(a.file_url)}" target="_blank" download="${this.escapeHtml(a.file_name)}">${this.escapeHtml(a.file_name)}</a>
+                        </div>
+                    `).join('')}
+                </div>` : '';
             return `
                 <div class="message ${isOwn ? 'message-own' : 'message-other'}">
                     <div class="message-bubble">
                         <span class="message-username">${this.escapeHtml(msg.user_name)}</span>
                         <div class="message-text">${this.escapeHtml(msg.text)}</div>
-                        ${fileHtml}
+                        ${attachmentsHtml}
                         <span class="message-time">${this.formatTime(msg.created_at)}</span>
                     </div>
                 </div>
@@ -233,19 +302,21 @@ class UnifiedChatManager {
         const msgDiv = document.createElement('div');
         msgDiv.className = `message ${isOwn ? 'message-own' : 'message-other'}`;
 
-        const fileHtml = message.file_url ? `
-            <div class="message-attachment">
-                <a href="${this.escapeHtml(message.file_url)}" target="_blank" download="${this.escapeHtml(message.file_name || 'file')}">
-                    📤 ${this.escapeHtml(message.file_name || 'Файл')}
-                </a>
-            </div>
-        ` : '';
+        const attachmentsHtml = message.attachments && message.attachments.length ? 
+            `<div class="message-attachments">
+                ${message.attachments.map(a => `
+                    <div class="attachment-link">
+                        <i class="fa-solid fa-file-arrow-up"></i>
+                        <a href="${this.escapeHtml(a.file_url)}" target="_blank" download="${this.escapeHtml(a.file_name)}">${this.escapeHtml(a.file_name)}</a>
+                    </div>
+                `).join('')}
+            </div>` : '';
 
         msgDiv.innerHTML = `
             <div class="message-bubble">
                 <span class="message-username">${this.escapeHtml(message.user_name)}</span>
                 <div class="message-text">${this.escapeHtml(message.text)}</div>
-                ${fileHtml}
+                ${attachmentsHtml}
                 <span class="message-time">${this.formatTime(message.created_at)}</span>
             </div>
         `;
@@ -257,40 +328,22 @@ class UnifiedChatManager {
         const chatData = this.chatsData.get(chatId);
         if (!chatData || !chatData.chatClient) return;
         const input = document.getElementById(`message-input-${chatId}`);
-        const text = input?.value.trim();
-        const fileData = chatData.pendingFile || null; // { file_url, file_name }
-        if (!text && !fileData) return;
-        const ok = await chatData.chatClient.sendMessage(text, fileData);
-        if (ok) input.value = '';
-        else this.showSystemMessage('❌ Не удалось отправить', 'error');
-    }
+        const text = input?.value.trim() || '';
+        const attachments = chatData.pendingAttachments || [];
+        if (!text && attachments.length === 0) return;
 
-
-    async loadInitialUnreadCounts() {
-        const buttons = document.querySelectorAll('.open-chat');
-        for (const btn of buttons) {
-            const chatId = parseInt(btn.dataset.chatId);
-            const username = this.currentUsername;
-            if (!chatId || !username) continue;
-            const client = new UnifiedChatClient(chatId, username);
-            const count = await client.getUnreadCount();
-            this.updateChatBadge(chatId, count);
-            // сохраняем данные чата
-            if (!this.chatsData.has(chatId)) {
-                this.chatsData.set(chatId, {
-                    messages: [],
-                    unreadCount: count,
-                    username: username,
-                    chatClient: null
-                });
-            } else {
-                this.chatsData.get(chatId).unreadCount = count;
-            }
+        const ok = await chatData.chatClient.sendMessage(text, attachments);
+        if (ok) {
+            input.value = '';
+            chatData.pendingAttachments = [];
+            this.renderAttachmentsPreview(chatId);
+        } else {
+            this.showSystemMessage('❌ Не удалось отправить', 'error');
         }
     }
 
     updateChatBadge(chatId, count) {
-        const buttons = document.querySelectorAll(`.open-chat[data-chat-id='${chatId}']`);
+        const  buttons = document.querySelectorAll(`.open-chat[data-chat-id='${chatId}']`);
         buttons.forEach(btn => {
             const oldBadge = btn.querySelector('.unread-badge');
             if (oldBadge) oldBadge.remove();
@@ -332,12 +385,6 @@ class UnifiedChatManager {
         const date = new Date(created_at);
         return date.toLocaleTimeString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
     }
-    
-    handleKeyPress(event, chatId) {
-        if (event.key === 'Enter') {
-            this.sendMessage(chatId);
-        }
-    }
 
     escapeHtml(str) {
         const div = document.createElement('div');
@@ -357,23 +404,59 @@ class UnifiedChatManager {
         if (input) input.click();
     }
 
-    async handleFileSelect(chatId, file) {
+    async handleFilesSelected(chatId, files) {
         const chatData = this.chatsData.get(chatId);
-        if (!chatData || !chatData.chatClient) return;
-        try {
-            const result = await chatData.chatClient.uploadFile(file);
-            chatData.pendingFile = { file_url: result.file_url, file_name: result.file_name };
-            // После загрузки можно либо сразу отправить сообщение с ссылкой,
-            // либо вставить ссылку в поле ввода.
-            const input = document.getElementById(`message-input-${chatId}`);
-            if (input) {
-                const linkText = `${result.file_name} (${this.formatFileSize(result.size)})`;
-                input.value = `📤 ${linkText}: ${result.file_url}`;
-            }
-            // Можно также сразу отправить, но лучше дать пользователю возможность добавить текст.
-        } catch(e) {
-            this.showSystemMessage('❌ Ошибка загрузки файла', 'error');
+        if (!chatData) return;
+
+        // Проверяем лимит
+        const currentCount = chatData.pendingAttachments.length;
+        const available = 5 - currentCount;
+        if (files.length > available) {
+            this.showSystemMessage(`Можно добавить не более ${available} файлов`, 'error');
+            files = files.slice(0, available);
         }
+
+        for (const file of files) {
+            try {
+                const result = await chatData.chatClient.uploadFile(file);
+                chatData.pendingAttachments.push({
+                    file_url: result.file_url,
+                    file_name: result.file_name,
+                    // можно сохранить и размер для отображения
+                });
+            } catch(e) {
+                this.showSystemMessage(`Ошибка загрузки файла ${file.name}`, 'error');
+            }
+        }
+        this.renderAttachmentsPreview(chatId);
+    }
+
+    renderAttachmentsPreview(chatId) {
+        const container = document.getElementById(`attachments-preview-${chatId}`);
+        if (!container) return;
+        const chatData = this.chatsData.get(chatId);
+        if (!chatData || chatData.pendingAttachments.length === 0) {
+            container.innerHTML = '';
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = 'flex';
+        container.innerHTML = chatData.pendingAttachments.map((att, index) => `
+            <div class="attachment-item" title="${this.escapeHtml(att.file_name)}">
+                <span class="file-icon"><i class="fa-solid fa-file-arrow-up"></i></span>
+                <span class="file-name">${this.escapeHtml(att.file_name)}</span>
+                <span class="remove-attachment" data-index="${index}">✕</span>
+            </div>
+        `).join('');
+
+        // Обработчики удаления
+        container.querySelectorAll('.remove-attachment').forEach(el => {
+            el.addEventListener('click', () => {
+                const idx = parseInt(el.dataset.index);
+                chatData.pendingAttachments.splice(idx, 1);
+                this.renderAttachmentsPreview(chatId);
+            });
+        });
     }
 
     formatFileSize(bytes) {
@@ -393,7 +476,7 @@ class UnifiedChatClient {
     async uploadFile(file) {
         const formData = new FormData();
         formData.append('file', file);
-        const resp = await fetch(`http://localhost:8080/chat/${this.chatId}/upload`, {
+        const resp = await fetch(`/chat/${this.chatId}/upload`, {
             method: 'POST',
             body: formData
         });
@@ -404,17 +487,17 @@ class UnifiedChatClient {
     }
 
     async loadMessages() {
-        const resp = await fetch(`http://localhost:8080/chat/${this.chatId}`);
+        const resp = await fetch(`/chat/${this.chatId}`);
         return resp.ok ? await resp.json() : [];
     }
     
-    async sendMessage(text, fileData = null) {
-        const payload = { user_name: this.username, text };
-        if (fileData) {
-            payload.file_url = fileData.file_url;
-            payload.file_name = fileData.file_name;
-        }
-        const resp = await fetch(`http://localhost:8080/chat/${this.chatId}`, {
+    async sendMessage(text, attachments = []) {
+        const payload = {
+            user_name: this.username,
+            text: text,
+            attachments: attachments.map(a => ({ file_url: a.file_url, file_name: a.file_name }))
+        };
+        const resp = await fetch(`/chat/${this.chatId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -423,14 +506,14 @@ class UnifiedChatClient {
     }
 
     async markAsRead() {
-        await fetch(`http://localhost:8080/chat/${this.chatId}/read`, {
+        await fetch(`/chat/${this.chatId}/read`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user_name: this.username })
         });
     }
     async getUnreadCount() {
-        const resp = await fetch(`http://localhost:8080/chat/${this.chatId}/unread?user_name=${encodeURIComponent(this.username)}`);
+        const resp = await fetch(`/chat/${this.chatId}/unread?user_name=${encodeURIComponent(this.username)}`);
         if (!resp.ok) return 0;
         const data = await resp.json();
         return data.unread || 0;
@@ -439,17 +522,11 @@ class UnifiedChatClient {
     disconnect() {}
 }
 
-
-// Инициализация при загрузке страницы
-document.addEventListener("DOMContentLoaded", async () => { // BX.ready( <=> document.addEventListener("DOMContentLoaded",
-    // Получите имя текущего пользователя из Битрикс24
-    let userName = 'Пользователь';
-    const bitrixUserNameContainer = document.getElementById("bitrixUserName");
-    if (bitrixUserNameContainer) userName = bitrixUserNameContainer.innerHTML; 
-    const currentUsername = userName;
-    window.chatManager = new UnifiedChatManager(currentUsername);
+document.addEventListener("DOMContentLoaded", async () => {
+    const bitrixUserNameContainer = document.getElementById('bitrixUserName');
+    const bitrixUserName = bitrixUserNameContainer ? bitrixUserNameContainer.textContent : 'Пользователь';
+    window.chatManager = new ChatManager(bitrixUserName);
     await window.chatManager.initialize();
-
     // Навесить обработчики на кнопки .open-chat
     document.querySelectorAll('.open-chat').forEach(btn => {
         btn.removeEventListener('click', window.joinChat);
@@ -458,11 +535,9 @@ document.addEventListener("DOMContentLoaded", async () => { // BX.ready( <=> doc
 });
 
 window.joinChat = function(event) {
-    const chatId = Number(event.currentTarget.dataset.chatId);
+    const chatId = event.currentTarget.dataset.chatId;
+    const withFiles = Boolean(event.currentTarget.dataset.withFiles);
     const chatName = event.currentTarget.dataset.chatName;
-    // Получите имя текущего пользователя из Битрикс24
-    let userName = 'Пользователь';
-    const bitrixUserNameContainer = document.getElementById("bitrixUserName");
-    if (bitrixUserNameContainer) userName =bitrixUserNameContainer.innerHTML; 
-    window.chatManager.joinChat(chatId, userName, chatName);
+    const userName = event.currentTarget.dataset.userName;
+    window.chatManager.joinChat(chatId, userName, chatName, withFiles);
 };

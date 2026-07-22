@@ -3,7 +3,7 @@
     right: 20px;
     top: 100px;
     bottom: 20px;
-    width: 400px;
+    width: 450px;
     display: flex;
     flex-direction: column;
     gap: 20px;
@@ -321,5 +321,160 @@
     to {
         transform: translateX(100%);
         opacity: 0;
+    }
+}
+
+/* === Контейнер превью файлов (под полем ввода) === */
+.attachments-preview {
+    display: none; /* скрыт по умолчанию, пока нет файлов */
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 15px 0 15px;
+    background: #f8f9fa;
+    border-top: 1px solid #e9ecef;
+    align-items: center;
+}
+
+/* Элемент с одним файлом в превью */
+.attachment-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: white;
+    padding: 4px 10px 4px 8px;
+    border-radius: 16px;
+    border: 1px solid #dee2e6;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    font-size: 13px;
+    transition: all 0.2s;
+    cursor: default;
+    max-width: 200px;
+}
+
+.attachment-item:hover {
+    background: #f1f3f5;
+    border-color: #3bc8f5;
+    box-shadow: 0 2px 6px rgba(59, 200, 245, 0.15);
+}
+
+/* Иконка файла */
+.attachment-item .file-icon {
+    font-size: 16px;
+    line-height: 1;
+}
+
+/* Имя файла – обрезаем длинные названия */
+.attachment-item .file-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #495057;
+    font-weight: 500;
+}
+
+/* Кнопка удаления (крестик) */
+.attachment-item .remove-attachment {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(255, 68, 68, 0.1);
+    color: #ff4444;
+    font-size: 14px;
+    font-weight: bold;
+    line-height: 1;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+    padding: 0;
+    user-select: none;
+}
+
+.attachment-item .remove-attachment:hover {
+    background: #ff4444;
+    color: white;
+    transform: scale(1.1);
+}
+
+/* === Вложения внутри сообщения === */
+.message-attachments {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 4px;
+    border-top: 1px dashed rgba(0,0,0,0.08);
+}
+
+/* Ссылка на файл в сообщении */
+.attachment-link {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: rgba(59, 200, 245, 0.08);
+    transition: background 0.2s;
+    font-size: 0.9em;
+}
+
+.attachment-link a {
+    color: #007bff;
+    text-decoration: none;
+    word-break: break-all;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+}
+
+.attachment-link a:hover {
+    text-decoration: underline;
+    color: #0056b3;
+}
+
+/* Для собственных сообщений – ссылки светлее */
+.message-own .attachment-link {
+    background: rgba(255,255,255,0.15);
+}
+.message-own .attachment-link a {
+    color: #ffffff;
+}
+.message-own .attachment-link a:hover {
+    color: #e0f0fa;
+}
+
+/* Если нужно показать превью изображений – добавляем класс */
+.attachment-image {
+    max-width: 200px;
+    max-height: 200px;
+    border-radius: 6px;
+    margin-top: 4px;
+    border: 1px solid #ddd;
+    display: block;
+}
+
+/* Адаптивность для мобильных устройств */
+@media (max-width: 768px) {
+    .attachments-preview {
+        padding: 6px 10px 0 10px;
+        gap: 5px;
+    }
+    .attachment-item {
+        font-size: 12px;
+        padding: 3px 8px 3px 6px;
+        max-width: 150px;
+    }
+    .attachment-item .remove-attachment {
+        width: 16px;
+        height: 16px;
+        font-size: 12px;
+    }
+    .attachment-image {
+        max-width: 150px;
+        max-height: 150px;
     }
 }
